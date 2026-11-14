@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mac Reaper: a disk and memory watchdog for macOS</title>
+<meta name="description" content="A menu bar watchdog for macOS. It clears regenerable caches when the disk runs low, asks before touching anything an open app is using, and warns when swap is climbing.">
+<meta property="og:title" content="Mac Reaper">
+<meta property="og:description" content="A disk and memory watchdog for macOS that lives in the menu bar.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 -30 720 760'%3E%3Cg fill='none' stroke='%23888' stroke-linecap='round'%3E%3Cpath d='M250 668 520 96' stroke-width='58'/%3E%3Cpath d='M372 410l80 38' stroke-width='44'/%3E%3C/g%3E%3Cpath fill='%23888' d='M548 84Q250-20 48 330 270 130 486 196Z'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f7f6f3; --fg: #1d1d1f; --mut: #6e6e73; --card: #ffffff; --line: #e2e1dc;
+    --safe: #2a7d4f; --ask: #a86200; --code: #efeee9; --shadow: 0 12px 40px rgba(0,0,0,.14);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161617; --fg: #f2f2f0; --mut: #a1a1a6; --card: #1f1f21; --line: #333336;
+      --safe: #62c08c; --ask: #e6a23c; --code: #232326; --shadow: 0 12px 40px rgba(0,0,0,.5);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 17px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 72px 20px 40px; }
+  a { color: inherit; text-underline-offset: 3px; }
+  h1 { font-size: 44px; line-height: 1.1; letter-spacing: -0.02em; margin: 18px 0 14px; }
+  h2 { font-size: 24px; line-height: 1.25; letter-spacing: -0.01em; margin: 72px 0 14px; }
+  h3 { font-size: 15px; font-weight: 600; margin: 0 0 10px; }
+  p { margin: 0 0 16px; }
+  .lead { font-size: 21px; line-height: 1.45; color: var(--mut); margin-bottom: 22px; }
+  .scythe { width: 52px; height: 52px; color: var(--fg); display: block; }
+  .tags { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; margin: 0; list-style: none; }
+  .tags li { font-size: 13px; color: var(--mut); border: 1px solid var(--line); border-radius: 999px; padding: 3px 11px; }
+  figure { margin: 40px 0 0; }
+  figure img { display: block; max-width: 100%; height: auto; border-radius: 12px; box-shadow: var(--shadow); }
+  figure.menu img.shot { width: 590px; }
+  figcaption { font-size: 14px; color: var(--mut); margin-top: 14px; }
+  .pill { height: 27px; width: auto; vertical-align: -8px; border-radius: 7px; margin: 0 2px; box-shadow: none; display: inline-block; }
+  pre {
+    background: var(--code); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+    font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-x: auto; margin: 0 0 16px;
+  }
+  code { font: 0.88em ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--code); padding: 1px 5px; border-radius: 5px; white-space: nowrap; }
+  pre mark { background: none; color: var(--ask); font-weight: 600; }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 20px 0 20px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  .stat .k { font-size: 13px; color: var(--mut); }
+  .stat .v { font-size: 26px; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; }
+  .stat .v span { color: var(--mut); font-weight: 400; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 18px; }
+  .group { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; }
+  .group h3::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; background: var(--safe); }
+  .group.ask h3::before { background: var(--ask); }
+  .group .sub { font-size: 13px; color: var(--mut); margin: -6px 0 10px; }
+  ul.plain { margin: 0; padding-left: 18px; font-size: 15.5px; }
+  ul.plain li { margin: 4px 0; }
+  ol.steps { padding-left: 22px; margin: 0 0 16px; }
+  ol.steps li { margin: 8px 0; padding-left: 4px; }
+  .note { border-left: 3px solid var(--line); padding: 2px 0 2px 16px; color: var(--mut); font-size: 15.5px; margin-top: 20px; }
+  footer { max-width: 720px; margin: 0 auto; padding: 28px 20px 64px; color: var(--mut); font-size: 14px; border-top: 1px solid var(--line); }
+  @media (max-width: 600px) {
+    main { padding-top: 44px; }
+    h1 { font-size: 34px; } .lead { font-size: 19px; } h2 { margin-top: 56px; }
+    .two, .stats { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<main>
+
+  <svg class="scythe" viewBox="0 -30 720 760" aria-hidden="true">
+    <g fill="none" stroke="currentColor" stroke-linecap="round">
+      <path d="M250 668 520 96" stroke-width="58"/>
+      <path d="M372 410l80 38" stroke-width="44"/>
+    </g>
+    <path fill="currentColor" d="M548 84Q250-20 48 330 270 130 486 196Z"/>
+  </svg>
+
+  <h1>Mac Reaper</h1>
+  <p class="lead">A disk and memory watchdog for macOS that lives in the menu bar. It clears regenerable caches when the disk runs low, asks before touching anything an open app is using, and warns when swap is climbing.</p>
+  <ul class="tags">
+    <li>One bash script</li><li>launchd</li><li>SwiftBar</li><li>No dependencies</li>
+  </ul>
+
+  <figure class="menu">
+    <img class="shot" src="img/menu.png" width="1180" height="892" alt="The Mac Reaper menu: disk 86% full with 30 GB free, memory and swap, how much was cleared, items that need an OK, items that are safe to clear, and links to the report, settings and log.">
+    <figcaption>The menu behind <img class="pill" src="img/pill.png" width="148" height="54" alt="the scythe icon showing 86%"> in the menu bar. Every item shows its size and, where it would ask first, the reason.</figcaption>
+  </figure>
+
+  <h2>Why it exists</h2>
+  <p>It was written for an 8 GB MacBook Air that kept running out of disk. Clearing caches by hand got back a few GB each time, and within days the disk was full again. Then the Mac froze and restarted itself.</p>
+  <p>The crash report explained it:</p>
+<pre>panic: watchdog timeout: no checkins from watchdogd in 94 seconds
+Compressor Info: … with <mark>18 swapfiles and LOW swap space</mark></pre>
+  <p>The disk wasn't filling up with files. Memory was running out, macOS was writing the overflow to disk as swap, and once there was no room for more swap the system stopped responding. After the restart, Activity Monitor showed where the memory was going: VS Code using about 7 GB across several windows, and the kernel responsible for 38.7 GB of the 46 GB written to disk since boot.</p>
+  <p>Closing all but one of those windows, and deleting nothing, did this:</p>
+  <div class="stats">
+    <div class="stat"><div class="k">Swap in use</div><div class="v">5.9 <span>→</span> 1.8 GB</div></div>
+    <div class="stat"><div class="k">Free disk</div><div class="v">1.5 <span>→</span> 5.5 GB</div></div>
+  </div>
+  <p>So the tool watches both. It watches disk because caches do pile up, and it watches swap because swap is what fills a small Mac fastest.</p>
+
+  <h2>How it decides</h2>
+  <p>Everything it could clear goes into one of two groups. The difference is whether clearing it could get in the way of something you are doing.</p>
+  <div class="two">
+    <div class="group">
+      <h3>Safe</h3>
+      <p class="sub">Cleared by itself when the disk is low</p>
+      <ul class="plain">
+        <li>Caches of apps that aren't open</li>
+        <li>Xcode build data, while Xcode is closed</li>
+        <li>The npm download cache</li>
+        <li>Dangling Docker images</li>
+        <li>Old Homebrew downloads</li>
+      </ul>
+    </div>
+    <div class="group ask">
+      <h3>Needs your OK</h3>
+      <p class="sub">Listed in one dialog that waits for an answer</p>
+      <ul class="plain">
+        <li>Caches of apps that are open right now</li>
+        <li>Xcode build data, while Xcode is open</li>
+        <li>Gradle and Maven caches</li>
+        <li>Tool caches in <code>~/.cache</code></li>
+        <li>The Docker build cache</li>
+        <li>Trash items older than 30 days</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>What a check does</h2>
+  <p>A background check runs every 10 minutes:</p>
+  <ol class="steps">
+    <li>It measures free disk and swap.</li>
+    <li>It works out what could be cleared and how big each item is.</li>
+    <li>Below 10 GB free, it clears the safe group, then shows a dialog listing the rest. No answer within two minutes counts as "not now".</li>
+    <li>Above 4 GB of swap, it sends a notification naming the apps using the most memory. Above 10 GB the notification is urgent.</li>
+  </ol>
+  <p class="note">It never quits an app and never touches documents, logs or crash reports.</p>
+
+  <figure>
+    <img src="img/report.png" width="1832" height="1511" alt="The Mac Reaper report: disk 86% full, 1.6 GB cleared today, and a table of what could be cleared now with each item's size, how it is handled and why it would ask.">
+    <figcaption>The report: disk and swap, what has been cleared, and what could be cleared now.</figcaption>
+  </figure>
+
+  <h2>Under the hood</h2>
+  <ul class="plain">
+    <li>One bash script of under 900 lines, written for the bash 3.2 that macOS ships.</li>
+    <li>A launchd agent runs the check. The menu is a three-line SwiftBar plugin that asks the same script to print it.</li>
+    <li>Open apps come from <code>lsappinfo</code>, and each cache folder is matched to its app by bundle ID.</li>
+    <li>State is plain text: a log, a history of every deletion and the latest scan. The report is generated HTML.</li>
+    <li>Thresholds, the Trash age limit and a keep-list for caches live in one settings file.</li>
+  </ul>
+
+  <h2>Install</h2>
+<pre>brew install --cask swiftbar
+git clone https://github.com/darrenrabbs/reaper.git
+bash reaper/mac-reaper.sh --install</pre>
+  <p>SwiftBar is only needed for the menu bar icon. Open it once and choose a plugin folder before running the last line. To remove everything, run the script with <code>--uninstall</code>.</p>
+
+  <h2>Status</h2>
+  <p>This is an early version that has run on one Mac so far. It deletes files, so check what it would clear first: <code>--dry-run</code> shows a full clean-up without deleting anything.</p>
+  <p>The source is on <a href="https://github.com/darrenrabbs/reaper">GitHub</a>. It was built by Darren Rabbitt with Claude as the coding agent.</p>
+
+</main>
+<footer>
+  <a href="https://darrenrabbitt.com">darrenrabbitt.com</a> · <a href="https://github.com/darrenrabbs/reaper">Source</a>
+</footer>
+</body>
+</html>
