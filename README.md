@@ -24,7 +24,8 @@ A background check runs every 10 minutes (a launchd agent). On each run it:
    measured the way Activity Monitor does. Swap left on disk after a busy spell does
    not count as pressure.
 
-It never quits apps and never touches documents, logs or crash reports.
+It never quits an app unless you pick Quit in the menu, and never touches documents, logs
+or crash reports.
 
 ## Menu bar
 
@@ -32,6 +33,10 @@ With [SwiftBar](https://github.com/swiftbar/SwiftBar) installed, a scythe icon s
 the disk percentage. The dropdown shows free space, swap and the biggest memory users,
 how much was cleared (today, 7 days, all time), every item that could be cleared with
 its size, and a full HTML report. Items can be cleared one at a time from the menu.
+
+Each app in the memory list has Quit and Force quit items, so the fix for a memory
+warning is in the same menu. Quit closes the app the normal way, so it can ask about
+unsaved work. Force quit stops it at once. Both ask first.
 
 Warnings can be snoozed from the menu for 1, 4 or 24 hours. Critical warnings still come
 through, and safe clean-ups still run. The report also lists large things the reaper
@@ -65,6 +70,8 @@ the script to deploy the new version.
 | `--approve <item> [--yes]` | Clear one item; asks first if it needs an OK |
 | `--approve-all [--yes]` | Clear everything that needs an OK, after one dialog |
 | `--snooze <minutes>` | Silence warnings for that long; `0` resumes |
+| `--quit-app <App.app path>` | Ask an app to quit the normal way, after a confirmation |
+| `--kill-app <App.app path>` | Force quit an app, after a confirmation |
 
 ## Settings
 

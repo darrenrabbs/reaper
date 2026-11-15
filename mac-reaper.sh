@@ -16,20 +16,21 @@
 #   you something (re-downloads, slower next build, files from your Trash).
 #   When free disk drops below WARN_FREE_GB it clears the safe items by itself,
 #   then shows a dialog listing the rest and waits for your answer.
-#   It never quits apps and never touches documents, logs or crash reports.
+#   It never quits an app unless you pick Quit in the menu, and never touches documents,
+#   logs or crash reports.
 #
 # Settings: ~/.mac-reaper/config      Log: ~/.mac-reaper/reaper.log
 
 set -u
 
-VERSION="2.2.1"
+VERSION="2.3"
 REAPER_DIR="${REAPER_DIR:-$HOME/.mac-reaper}"
 SELF="$REAPER_DIR/mac-reaper.sh"
 LOG="$REAPER_DIR/reaper.log"
 CAND="$REAPER_DIR/candidates.tsv"   # id, class (auto|confirm), KB (-1 unknown), label, reason
 CACHES="$REAPER_DIR/caches.tsv"     # KB, owning app if open (or -), folder name
 HIST="$REAPER_DIR/history.tsv"      # when, how (auto|approved|manual), KB freed, id, label
-MEMFILE="$REAPER_DIR/memory.tsv"    # MB, app; biggest first, refreshed by each background check
+MEMFILE="$REAPER_DIR/memory.tsv"    # MB, app, path of the .app if it can be quit from the menu (or -)
 LARGE="$REAPER_DIR/large.tsv"       # KB, label, what you can do; big things it leaves alone
 SNOOZE="$REAPER_DIR/.snooze"        # epoch and label of when warnings resume
 REPORT="$REAPER_DIR/report.html"
@@ -146,10 +147,18 @@ memory_snapshot() {
     FILENAME == ARGV[1] {
       if ($1 ~ /^[0-9]+$/ && $2 ~ /^[0-9.]+[BKMG][+-]*$/) { foot[$1] = mb($2); have = 1 }
       next }
-    { pid = $1; rss = $2; $1 = ""; $2 = ""; sub(/^ +/, ""); n = split($0, p, "/"); name = p[n]
-      for (i = 1; i <= n; i++) if (p[i] ~ /\.app$/) { name = p[i]; sub(/\.app$/, "", name); break }
+    { pid = $1; rss = $2; $1 = ""; $2 = ""; sub(/^ +/, ""); n = split($0, p, "/"); name = p[n]; dir = ""
+      for (i = 1; i <= n; i++) {
+        dir = dir (i > 1 ? "/" : "") p[i]
+        if (p[i] ~ /\.app$/) {
+          name = p[i]; sub(/\.app$/, "", name)
+          # only ordinary apps get a Quit item: not system services, not the menu host
+          if (dir ~ /\/Applications\// && dir !~ /^\/System\/Library\// && name != "SwiftBar" && dir !~ /["|]/) app[name] = dir
+          break
+        }
+      }
       if (have) { if (pid in foot) sum[name] += foot[pid] } else sum[name] += rss / 1024 }
-    END { for (k in sum) if (sum[k] >= 1) printf "%d\t%s\n", sum[k], k }' "$raw" "$pids" |
+    END { for (k in sum) if (sum[k] >= 1) printf "%d\t%s\t%s\n", sum[k], k, (k in app ? app[k] : "-") }' "$raw" "$pids" |
     sort -rn > "$MEMFILE.tmp" && mv "$MEMFILE.tmp" "$MEMFILE"
   rm -f "$raw" "$pids"
 }
@@ -225,7 +234,7 @@ notify() {
 confirm_dialog() {
   local msg="$1" ok="$2" out
   [ "$ASSUME_YES" = 1 ] && return 0
-  if [ "$DRY_RUN" = 1 ]; then log "would ask: $msg"; return 1; fi
+  if [ "$DRY_RUN" = 1 ]; then log "would ask: $(printf '%s' "$msg" | sed 's/\\n/ /g' | tr -s ' ')"; return 1; fi
   out=$(/usr/bin/osascript -e "display dialog \"$msg\" with title \"Mac Reaper\" buttons {\"Not now\", \"$ok\"} default button \"Not now\" cancel button \"Not now\" with icon caution giving up after $DIALOG_TIMEOUT_SEC" 2>/dev/null)
   case "$out" in *"button returned:$ok"*) return 0 ;; esac
   return 1
@@ -679,6 +688,48 @@ do_scan() {
   scan; finish
 }
 
+# ---------------------------------------------------------------- quitting an app from the menu
+
+# app_pids <path of .app>: every process that runs from inside that app, main process first.
+app_pids() {
+  ps -axo pid=,comm= 2>/dev/null | awk -v a="$1" '
+    { pid = $1; $1 = ""; sub(/^ +/, "") }
+    index($0, a "/Contents/MacOS/") == 1 { main = main " " pid; next }
+    index($0, a "/") == 1 { rest = rest " " pid }
+    END { print main rest }'
+}
+
+# do_quit_app <path of .app> <quit|kill>
+# quit asks the app to close the normal way, so it can prompt about unsaved work.
+# kill stops it at once, which loses unsaved work; for an app that will not quit.
+do_quit_app() {
+  local path="${1:-}" how="$2" name id pids pid mb
+  case "$path" in /*.app) ;; *) echo "usage: --quit-app|--kill-app /path/to/App.app"; exit 2 ;; esac
+  [ -d "$path" ] || { echo "no such app: $path"; exit 1; }
+  name=${path##*/}; name=$(clean "${name%.app}")
+  pids=$(app_pids "$path")
+  [ -n "${pids// /}" ] || { log "$name is not running"; memory_snapshot; finish; exit 0; }
+  mb=$(awk -F'\t' -v n="$name" '$2 == n { print $1; exit }' "$MEMFILE" 2>/dev/null)
+
+  if [ "$how" = quit ]; then
+    id=$(defaults read "$path/Contents/Info" CFBundleIdentifier 2>/dev/null)
+    case "$id" in ''|*[!A-Za-z0-9._-]*) echo "could not read the app's identifier: $path"; exit 1 ;; esac
+    confirm_dialog "Quit $name?\n\nIt is using about $(human $(( ${mb:-0} * 1024 ))) of memory. It closes the normal way, so it will ask about unsaved work." "Quit" || { log "not quit (you said not now): $name"; exit 0; }
+    [ "$DRY_RUN" = 1 ] && exit 0
+    /usr/bin/osascript -e "tell application id \"$id\" to quit" >/dev/null 2>&1
+    log "asked $name to quit (was using ${mb:-?} MB)"
+  else
+    confirm_dialog "Force quit $name?\n\nIt stops at once and unsaved work in it is lost. Use this only when it will not quit the normal way." "Force quit" || { log "not force quit (you said not now): $name"; exit 0; }
+    [ "$DRY_RUN" = 1 ] && exit 0
+    for pid in $pids; do kill -TERM "$pid" 2>/dev/null; done
+    sleep 2
+    for pid in $(app_pids "$path"); do kill -KILL "$pid" 2>/dev/null; done
+    log "force quit $name (was using ${mb:-?} MB)"
+  fi
+  sleep 3
+  memory_snapshot; finish
+}
+
 # ---------------------------------------------------------------- SwiftBar menu
 
 totals() {
@@ -711,7 +762,14 @@ render_menu() {
     echo "Memory $mem · swap $(human $((swap * 1024))) | $(act --report)"
   fi
   if [ -s "$MEMFILE" ]; then
-    head -n 6 "$MEMFILE" | while IFS="$TAB" read -r kb label; do echo "--$(clean "$label") · $(human $((kb * 1024)))"; done
+    head -n 6 "$MEMFILE" | while IFS="$TAB" read -r kb label reason; do
+      label=$(clean "$label")
+      echo "--$label · $(human $((kb * 1024)))"
+      case "$reason" in /*.app)
+        echo "----Quit $label… | bash=\"$SELF\" param1=--quit-app param2=\"$reason\" terminal=false refresh=true"
+        echo "----Force quit… | bash=\"$SELF\" param1=--kill-app param2=\"$reason\" terminal=false refresh=true" ;;
+      esac
+    done
   fi
   if command -v colima >/dev/null 2>&1 && pgrep -f 'limactl' >/dev/null 2>&1; then
     echo "--Stop colima to free memory | bash=\"$(command -v colima)\" param1=stop terminal=false refresh=true"
@@ -838,7 +896,7 @@ HTML
       done
     fi
     echo '</table></div><h2>Biggest memory users</h2><div class="card"><table><tr><th>App</th><th class="n">Memory</th></tr>'
-    top_memory_lines 8 | while IFS="$TAB" read -r kb label; do
+    top_memory_lines 8 | while IFS="$TAB" read -r kb label reason; do
       printf '<tr><td>%s</td><td class="n">%s</td></tr>\n' "$(printf '%s' "$label" | html)" "$(human $((kb * 1024)))"
     done
     echo '</table></div><h2>Large items it leaves alone</h2><div class="card"><table><tr><th>Item</th><th class="n">Size</th><th>What you can do</th></tr>'
@@ -1009,6 +1067,8 @@ case "$CMD" in
   --approve)        do_approve "$ARG" ;;
   --approve-all)    do_approve_all ;;
   --snooze)         do_snooze "${ARG:-60}" ;;
+  --quit-app)       do_quit_app "$ARG" quit ;;
+  --kill-app)       do_quit_app "$ARG" kill ;;
   --dry-run)        DRY_RUN=1; FORCE=1; run_check ;;
   --force)          FORCE=1; run_check ;;
   "")               run_check ;;
