@@ -8,6 +8,7 @@
 #   bash mac-reaper.sh --report           build the full report and open it
 #   bash mac-reaper.sh --dry-run          show what a clean-up would do, delete nothing
 #   bash mac-reaper.sh --force            run a clean-up now, whatever the free space is
+#   bash mac-reaper.sh --snooze 60        silence warnings for 60 minutes (0 = resume)
 #
 # How it decides:
 #   Every item it could clear is either "safe" or "needs your OK".
@@ -21,13 +22,16 @@
 
 set -u
 
-VERSION="2.1"
+VERSION="2.2"
 REAPER_DIR="${REAPER_DIR:-$HOME/.mac-reaper}"
 SELF="$REAPER_DIR/mac-reaper.sh"
 LOG="$REAPER_DIR/reaper.log"
 CAND="$REAPER_DIR/candidates.tsv"   # id, class (auto|confirm), KB (-1 unknown), label, reason
 CACHES="$REAPER_DIR/caches.tsv"     # KB, owning app if open (or -), folder name
 HIST="$REAPER_DIR/history.tsv"      # when, how (auto|approved|manual), KB freed, id, label
+MEMFILE="$REAPER_DIR/memory.tsv"    # MB, app; biggest first, refreshed by each background check
+LARGE="$REAPER_DIR/large.tsv"       # KB, label, what you can do; big things it leaves alone
+SNOOZE="$REAPER_DIR/.snooze"        # epoch and label of when warnings resume
 REPORT="$REAPER_DIR/report.html"
 LABEL="local.mac-reaper"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -44,6 +48,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PAT
 : "${WARN_USED_PCT:=0}"        # also act when the disk is this % full; 0 = off
 : "${SWAP_WARN_MB:=4096}"      # notify when swap in use passes this
 : "${SWAP_CRIT_MB:=10240}"     # urgent notify (and optional colima stop) past this
+: "${SWAP_RISE_MB:=1024}"      # also warn when swap grows this much between two checks
 : "${AUTO_STOP_COLIMA:=0}"     # 1 = run "colima stop" when swap passes SWAP_CRIT_MB
 : "${TRASH_MAX_AGE_DAYS:=30}"  # offer Trash items older than this; 0 = never touch Trash
 : "${KEEP_CACHES:=}"           # names inside ~/Library/Caches to keep, colon-separated
@@ -111,13 +116,48 @@ swap_used_mb() {
     }}'
 }
 
-# Memory by app, biggest first: "MB<TAB>name". Helpers are added to their parent .app.
+# Kernel memory pressure: 1 normal, 2 warning, 4 critical. Empty if macOS will not say.
+pressure_level() { sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null | tr -dc '0-9'; }
+
+# mem_state <swap MB> <pressure>: fine, tight or critical.
+# Pressure decides when macOS reports it: swap left on disk after a busy spell is not pressure.
+mem_state() {
+  case "$2" in
+    4) echo critical ;;
+    2) echo tight ;;
+    1) echo fine ;;
+    *) if [ "$1" -ge "$SWAP_CRIT_MB" ]; then echo critical
+       elif [ "$1" -ge "$SWAP_WARN_MB" ]; then echo tight; else echo fine; fi ;;
+  esac
+}
+
+# Writes MEMFILE: memory by app, helpers added to their parent .app. Uses the footprint
+# that Activity Monitor shows (it includes compressed and swapped memory); falls back to
+# resident memory from ps when top gives nothing.
+memory_snapshot() {
+  local raw="$REAPER_DIR/.top.$$" pids="$REAPER_DIR/.ps.$$"
+  mkdir -p "$REAPER_DIR"
+  ps -axo pid=,rss=,comm= 2>/dev/null > "$pids"
+  : > "$raw"
+  run_with_timeout 20 top -l 1 -stats pid,mem > "$raw" 2>/dev/null
+  awk '
+    function mb(v,   u, x) { sub(/[+-]+$/, "", v); u = substr(v, length(v)); x = substr(v, 1, length(v) - 1) + 0
+      return u == "G" ? x * 1024 : u == "M" ? x : u == "K" ? x / 1024 : u == "B" ? x / 1048576 : -1 }
+    FILENAME == ARGV[1] {
+      if ($1 ~ /^[0-9]+$/ && $2 ~ /^[0-9.]+[BKMG][+-]*$/) { foot[$1] = mb($2); have = 1 }
+      next }
+    { pid = $1; rss = $2; $1 = ""; $2 = ""; sub(/^ +/, ""); n = split($0, p, "/"); name = p[n]
+      for (i = 1; i <= n; i++) if (p[i] ~ /\.app$/) { name = p[i]; sub(/\.app$/, "", name); break }
+      if (have) { if (pid in foot) sum[name] += foot[pid] } else sum[name] += rss / 1024 }
+    END { for (k in sum) if (sum[k] >= 1) printf "%d\t%s\n", sum[k], k }' "$raw" "$pids" |
+    sort -rn > "$MEMFILE.tmp" && mv "$MEMFILE.tmp" "$MEMFILE"
+  rm -f "$raw" "$pids"
+}
+
+# "MB<TAB>app" lines, biggest first, from the latest snapshot.
 top_memory_lines() {
-  ps -axo rss=,comm= 2>/dev/null | awk '{
-    rss = $1; $1 = ""; sub(/^ +/, ""); n = split($0, p, "/"); name = p[n]
-    for (i = 1; i <= n; i++) if (p[i] ~ /\.app$/) { name = p[i]; sub(/\.app$/, "", name); break }
-    sum[name] += rss
-  } END { for (k in sum) printf "%d\t%s\n", sum[k]/1024, k }' | sort -rn | head -n "${1:-5}"
+  [ -s "$MEMFILE" ] || memory_snapshot
+  head -n "${1:-5}" "$MEMFILE" 2>/dev/null
 }
 
 top_memory() {
@@ -143,9 +183,38 @@ stamp_due() {
   return 0
 }
 
-notify() {  # notify <kind> <title> <message>; repeats of one kind are rate-limited
+# snoozed: true while warnings are snoozed; sets SNOOZE_LABEL to when they resume.
+snoozed() {
+  local end now
+  SNOOZE_LABEL=""
+  [ -f "$SNOOZE" ] || return 1
+  IFS="$TAB" read -r end SNOOZE_LABEL < "$SNOOZE"
+  case "$end" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(date +%s)
+  [ "$now" -lt "$end" ]
+}
+
+do_snooze() {  # do_snooze <minutes>; 0 resumes
+  local min="${1:-60}" label
+  case "$min" in ''|*[!0-9]*) echo "usage: --snooze <minutes>   (0 to resume)"; exit 2 ;; esac
+  mkdir -p "$REAPER_DIR"
+  if [ "$min" -eq 0 ]; then
+    rm -f "$SNOOZE"; log "snooze ended"
+  else
+    label=$(date -v+"${min}"M '+%a %H:%M' 2>/dev/null || date -d "+${min} minutes" '+%a %H:%M' 2>/dev/null)
+    printf '%s\t%s\n' "$(( $(date +%s) + min * 60 ))" "$label" > "$SNOOZE"
+    log "warnings snoozed until $label"
+  fi
+}
+
+# notify <kind> <title> <message>; repeats of one kind are rate-limited.
+# While snoozed only the critical kinds (disk-crit, swap-crit) are shown; the rest are logged.
+notify() {
   local title="$2" msg; msg="$(clean "$3")"
   stamp_due "notify-$1" "$NOTIFY_EVERY_MIN" || return 0
+  if snoozed; then
+    case "$1" in *-crit) ;; *) log "snoozed, not shown: [$title] $msg"; return 0 ;; esac
+  fi
   log "NOTIFY [$title] $msg"
   [ "$DRY_RUN" = 1 ] && return 0
   /usr/bin/osascript -e "display notification \"$msg\" with title \"$title\" sound name \"Basso\"" >/dev/null 2>&1
@@ -334,7 +403,33 @@ scan() {
   fi
 
   mv "$CAND_TMP" "$CAND"
+  scan_large
   date +%s > "$REAPER_DIR/.stamp-scan"
+}
+
+# Big things the reaper never touches, listed in the report so nothing hides. Only places a
+# background job can read without macOS asking for permission.
+large_item() {  # large_item <path> <label> <what you can do>
+  local kb
+  [ -e "$1" ] || return 0
+  kb=$(run_with_timeout 20 du -sk "$1" 2>/dev/null | awk '{print $1}')
+  case "$kb" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$kb" -ge 512000 ] || return 0
+  printf '%s\t%s\t%s\n' "$kb" "$2" "$3" >> "$LARGE.tmp"
+}
+
+scan_large() {
+  : > "$LARGE.tmp"
+  large_item "$HOME/.colima" "colima virtual machine disk" "shrinks only if recreated: colima delete, then colima start"
+  large_item "$HOME/.ollama/models" "Ollama models" "remove one with: ollama rm MODEL"
+  large_item "$HOME/Library/Developer/CoreSimulator/Devices" "iOS simulators" "delete unused ones in Xcode, or all with: xcrun simctl delete all"
+  large_item "/Library/Developer/CoreSimulator" "iOS simulator runtimes" "remove in Xcode, Settings, Components"
+  large_item "$HOME/Library/Developer/Xcode/Archives" "Xcode archives" "delete old ones in Xcode, Organizer"
+  large_item "$HOME/Library/Application Support/Claude" "Claude desktop app data" "see Storage in the Claude app settings"
+  large_item "/Library/Application Support/Logi/LogiOptionsPlus/depots" "Logitech Options+ update copies" "old copies need sudo to delete"
+  large_item "$HOME/.pyenv/versions" "pyenv Python versions" "remove one with: pyenv uninstall VERSION"
+  large_item "$HOME/go/pkg/mod" "Go module cache" "clear with: go clean -modcache"
+  sort -rn "$LARGE.tmp" > "$LARGE"; rm -f "$LARGE.tmp"
 }
 
 scan_due() {
@@ -448,6 +543,7 @@ ask_pending() {  # scheduled run, disk low: one dialog for everything that needs
   sum_class confirm
   [ "$SUM_N" -gt 0 ] || return 0
   [ "$SUM_KB" -ge $((ASK_MIN_MB * 1024)) ] || return 0
+  snoozed && return 0
   stamp_due ask "$NOTIFY_EVERY_MIN" || return 0
   local msg
   msg="Disk is ${DISK_PCT}% full, $(gb "$DISK_FREE_KB") GB free.\n\nThese can be cleared, but each may affect something in use:\n\n$(pending_text)\nClear them all now? To pick single items, use the menu bar icon."
@@ -462,21 +558,26 @@ ask_pending() {  # scheduled run, disk low: one dialog for everything that needs
   fi
 }
 
-check_memory() {
-  local swap="$1" top
+check_memory() {  # check_memory <swap MB> <pressure level>
+  local swap="$1" state top prev rise=""
   [ -n "$swap" ] || return 0
-  if [ "$swap" -ge "$SWAP_CRIT_MB" ]; then
-    top="$(top_memory 4)"
+  state=$(mem_state "$swap" "${2:-}")
+  prev=$(cat "$REAPER_DIR/.last-swap" 2>/dev/null)
+  case "$prev" in ''|*[!0-9]*) prev=$swap ;; esac
+  [ "$DRY_RUN" = 1 ] || echo "$swap" > "$REAPER_DIR/.last-swap"
+  [ $((swap - prev)) -ge "$SWAP_RISE_MB" ] && rise=" and rising"
+  top="$(top_memory 4)"
+  if [ "$state" = critical ] || [ "$swap" -ge "$SWAP_CRIT_MB" ]; then
     if [ "$AUTO_STOP_COLIMA" = 1 ] && command -v colima >/dev/null 2>&1 && run_with_timeout 15 colima status >/dev/null 2>&1; then
       if [ "$DRY_RUN" = 1 ]; then log "would stop colima"; else
         run_with_timeout 120 colima stop >/dev/null 2>&1 && log "stopped colima (swap ${swap} MB)"
       fi
-      notify swap-crit "Mac Reaper: memory critical" "Swap ${swap} MB. Stopped colima. Close apps now: $top"
+      notify swap-crit "Mac Reaper: memory critical" "Swap ${swap} MB${rise}. Stopped colima. Close apps now: $top"
     else
-      notify swap-crit "Mac Reaper: memory critical" "Swap ${swap} MB. Close apps now or the Mac may freeze: $top"
+      notify swap-crit "Mac Reaper: memory critical" "Swap ${swap} MB${rise}. Close apps now or the Mac may freeze: $top"
     fi
-  elif [ "$swap" -ge "$SWAP_WARN_MB" ]; then
-    notify swap-warn "Mac Reaper: memory is tight" "Swap ${swap} MB. Biggest: $(top_memory 4)"
+  elif [ "$swap" -ge "$SWAP_WARN_MB" ] && { [ "$state" = tight ] || [ -n "$rise" ]; }; then
+    notify swap-warn "Mac Reaper: memory is tight" "Swap ${swap} MB${rise}. Biggest: $top"
   fi
 }
 
@@ -491,11 +592,13 @@ finish() {  # refresh the things the menu and report read
 run_check() {
   acquire_lock || exit 0
   rotate_log
-  local swap low=0 auto_kb=0 more
+  local swap low=0 auto_kb=0 more level
   ASKED_KB=0
-  disk_read; swap=$(swap_used_mb)
+  disk_read; swap=$(swap_used_mb); level=$(pressure_level)
   [ "$DISK_TOTAL_KB" -gt 0 ] || { log "could not read free disk space"; exit 1; }
-  log "check: ${DISK_PCT}% full, $(gb "$DISK_FREE_KB") GB free, swap ${swap:-?} MB"
+  log "check: ${DISK_PCT}% full, $(gb "$DISK_FREE_KB") GB free, swap ${swap:-?} MB, memory $(mem_state "${swap:-0}" "$level") (pressure ${level:-unknown})"
+  [ "$DRY_RUN" = 1 ] || date +%s > "$REAPER_DIR/.stamp-check"
+  memory_snapshot
   if [ "$FORCE" = 1 ] || is_low; then low=1; fi
 
   if [ "$low" = 1 ] || scan_due; then scan; fi
@@ -516,7 +619,7 @@ run_check() {
       fi
     fi
   fi
-  check_memory "$swap"
+  check_memory "$swap" "$level"
   [ "$DRY_RUN" = 1 ] || finish
 }
 
@@ -587,23 +690,29 @@ totals() {
 act() { printf 'bash="%s" param1=%s%s terminal=false refresh=true' "$SELF" "$1" "${2:+ param2=$2}"; }
 
 render_menu() {
-  local swap title color="" mem id class kb label reason n when how
+  local swap title color="" mem id class kb label reason n when how last age
   disk_read; swap=$(swap_used_mb); swap=${swap:-0}; totals
   title="${DISK_PCT}%"
   if [ "$TODAY_KB" -ge 102400 ]; then title="$title  ↓$(human "$TODAY_KB")"; fi
+  if snoozed; then title="$title  zz"; fi
   if is_crit; then color=" color=#FF453A"; elif is_low; then color=" color=#FF9F0A"; fi
   echo "$title | templateImage=$ICON$color"
   echo "---"
   echo "Disk ${DISK_PCT}% full · $(gb "$DISK_FREE_KB") GB free of $(gb "$DISK_TOTAL_KB") GB | $(act --report)"
-  mem="fine"
-  if [ "$swap" -ge "$SWAP_CRIT_MB" ]; then mem="critical"; elif [ "$swap" -ge "$SWAP_WARN_MB" ]; then mem="tight"; fi
-  echo "Memory $mem · swap $(human $((swap * 1024)))"
-  top_memory_lines 6 | while IFS="$TAB" read -r kb label; do echo "--$(clean "$label") · $kb MB"; done
+  mem=$(mem_state "$swap" "$(pressure_level)")
+  if [ "$mem" = fine ] && [ "$swap" -ge "$SWAP_WARN_MB" ]; then
+    echo "Memory fine now · $(human $((swap * 1024))) still in swap | $(act --report)"
+  else
+    echo "Memory $mem · swap $(human $((swap * 1024))) | $(act --report)"
+  fi
+  if [ -s "$MEMFILE" ]; then
+    head -n 6 "$MEMFILE" | while IFS="$TAB" read -r kb label; do echo "--$(clean "$label") · $(human $((kb * 1024)))"; done
+  fi
   if command -v colima >/dev/null 2>&1 && pgrep -f 'limactl' >/dev/null 2>&1; then
     echo "--Stop colima to free memory | bash=\"$(command -v colima)\" param1=stop terminal=false refresh=true"
   fi
   echo "---"
-  echo "Cleared today $(human "$TODAY_KB") · 7 days $(human "$WEEK_KB") · all time $(human "$ALL_KB")"
+  echo "Cleared today $(human "$TODAY_KB") · 7 days $(human "$WEEK_KB") · all time $(human "$ALL_KB") | $(act --report)"
   if [ -s "$HIST" ]; then
     tail -n 12 "$HIST" | awk -F'\t' '{ l[NR] = $0 } END { for (i = NR; i >= 1; i--) print l[i] }' |
     while IFS="$TAB" read -r when how kb id label; do
@@ -641,6 +750,22 @@ render_menu() {
     echo "Nothing to clear right now"
     echo "---"
   fi
+  if snoozed; then
+    echo "Warnings snoozed until $SNOOZE_LABEL · click to resume | $(act --snooze 0)"
+  else
+    echo "Snooze warnings"
+    echo "--For 1 hour | $(act --snooze 60)"
+    echo "--For 4 hours | $(act --snooze 240)"
+    echo "--For 24 hours | $(act --snooze 1440)"
+  fi
+  last=$(cat "$REAPER_DIR/.stamp-check" 2>/dev/null)
+  case "$last" in ''|*[!0-9]*) ;; *)
+    age=$(( ($(date +%s) - last) / 60 ))
+    if [ "$age" -lt 1 ]; then echo "Last background check just now | size=12"
+    elif [ "$age" -lt 120 ]; then echo "Last background check $age min ago | size=12"
+    else echo "Last background check $((age / 60)) hours ago | size=12"; fi ;;
+  esac
+  echo "---"
   echo "Full report | $(act --report)"
   echo "Rescan now | $(act --scan)"
   echo "Settings | bash=/usr/bin/open param1=-t param2=\"$REAPER_DIR/config\" terminal=false"
@@ -650,8 +775,8 @@ render_menu() {
 # ---------------------------------------------------------------- report
 
 write_report() {
-  local swap id class kb label reason
-  disk_read; swap=$(swap_used_mb); totals
+  local swap id class kb label reason level
+  disk_read; swap=$(swap_used_mb); level=$(pressure_level); totals
   {
     cat <<HTML
 <!doctype html><html lang="en"><head><meta charset="utf-8"><title>Mac Reaper report</title>
@@ -670,7 +795,7 @@ th{font-weight:600;color:var(--mut);font-size:12px}td.n,th.n{text-align:right;wh
 <h2>Disk</h2><div class="card"><span class="big">${DISK_PCT}% full</span>
 <div class="bar"><i style="width:${DISK_PCT}%;background:var(--$(if is_crit; then echo bad; elif is_low; then echo warn; else echo ok; fi))"></i></div>
 $(gb "$DISK_FREE_KB") GB free of $(gb "$DISK_TOTAL_KB") GB. Cleans by itself below $WARN_FREE_GB GB free; urgent below $CRIT_FREE_GB GB.<br>
-Swap in use: ${swap:-?} MB (warns at $SWAP_WARN_MB MB, critical at $SWAP_CRIT_MB MB).</div>
+Memory is $(mem_state "${swap:-0}" "$level"). Swap in use: ${swap:-?} MB (warns at $SWAP_WARN_MB MB under pressure or when rising, critical at $SWAP_CRIT_MB MB).</div>
 <h2>Cleared so far</h2><div class="grid">
 <div class="card"><div class="mut">Today</div><div class="big">$(human "$TODAY_KB")</div></div>
 <div class="card"><div class="mut">Last 7 days</div><div class="big">$(human "$WEEK_KB")</div></div>
@@ -709,8 +834,17 @@ HTML
     fi
     echo '</table></div><h2>Biggest memory users</h2><div class="card"><table><tr><th>App</th><th class="n">Memory</th></tr>'
     top_memory_lines 8 | while IFS="$TAB" read -r kb label; do
-      printf '<tr><td>%s</td><td class="n">%s MB</td></tr>\n' "$(printf '%s' "$label" | html)" "$kb"
+      printf '<tr><td>%s</td><td class="n">%s</td></tr>\n' "$(printf '%s' "$label" | html)" "$(human $((kb * 1024)))"
     done
+    echo '</table></div><h2>Large items it leaves alone</h2><div class="card"><table><tr><th>Item</th><th class="n">Size</th><th>What you can do</th></tr>'
+    if [ -s "$LARGE" ]; then
+      while IFS="$TAB" read -r kb label reason; do
+        printf '<tr><td>%s</td><td class="n">%s</td><td>%s</td></tr>\n' \
+          "$(printf '%s' "$label" | html)" "$(human "$kb")" "$(printf '%s' "$reason" | html)"
+      done < "$LARGE"
+    else
+      echo '<tr><td colspan="3" class="mut">Nothing over 500 MB in the places it checks.</td></tr>'
+    fi
     echo "</table></div><p class=\"mut\">Settings: $REAPER_DIR/config · Log: $LOG</p></body></html>"
   } > "$REPORT.tmp" && mv "$REPORT.tmp" "$REPORT"
 }
@@ -724,10 +858,12 @@ do_report() {
 }
 
 do_status() {
-  local swap id class kb label reason
-  disk_read; swap=$(swap_used_mb); totals
+  local swap id class kb label reason level
+  disk_read; swap=$(swap_used_mb); level=$(pressure_level); totals
+  memory_snapshot
   echo "Disk:       ${DISK_PCT}% full, $(gb "$DISK_FREE_KB") GB free of $(gb "$DISK_TOTAL_KB") GB   (acts below $WARN_FREE_GB GB free)"
-  echo "Swap used:  ${swap:-?} MB   (warns at $SWAP_WARN_MB MB, critical at $SWAP_CRIT_MB MB)"
+  echo "Memory:     $(mem_state "${swap:-0}" "$level") (pressure ${level:-unknown}), swap ${swap:-?} MB"
+  if snoozed; then echo "Warnings:   snoozed until $SNOOZE_LABEL"; fi
   echo "Top memory: $(top_memory 5)"
   echo "Cleared:    today $(human "$TODAY_KB"), last 7 days $(human "$WEEK_KB"), all time $(human "$ALL_KB")"
   if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then echo "Schedule:   installed"; else echo "Schedule:   not installed"; fi
@@ -794,6 +930,7 @@ do_install() {
 #WARN_USED_PCT=0        # also act when the disk is this % full; 0 = off
 #SWAP_WARN_MB=4096      # notify when swap in use passes this
 #SWAP_CRIT_MB=10240     # urgent notify past this
+#SWAP_RISE_MB=1024      # also warn when swap grows this much between two checks
 #AUTO_STOP_COLIMA=0     # 1 = stop colima automatically at SWAP_CRIT_MB
 #TRASH_MAX_AGE_DAYS=30  # 0 = never touch Trash
 #KEEP_CACHES=           # e.g. ms-playwright:JetBrains
@@ -861,8 +998,9 @@ case "$CMD" in
   --clean-safe)     do_clean_safe ;;
   --approve)        do_approve "$ARG" ;;
   --approve-all)    do_approve_all ;;
+  --snooze)         do_snooze "${ARG:-60}" ;;
   --dry-run)        DRY_RUN=1; FORCE=1; run_check ;;
   --force)          FORCE=1; run_check ;;
   "")               run_check ;;
-  *)                sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *)                sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

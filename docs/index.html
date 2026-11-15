@@ -139,8 +139,9 @@ Compressor Info: … with <mark>18 swapfiles and LOW swap space</mark></pre>
     <li>It measures free disk and swap.</li>
     <li>It works out what could be cleared and how big each item is.</li>
     <li>Below 10 GB free, it clears the safe group, then shows a dialog listing the rest. No answer within two minutes counts as "not now".</li>
-    <li>Above 4 GB of swap, it sends a notification naming the apps using the most memory. Above 10 GB the notification is urgent.</li>
+    <li>When macOS reports memory pressure and swap is above 4 GB, or swap is growing fast, it sends a notification naming the apps using the most memory. Above 10 GB of swap the notification is urgent.</li>
   </ol>
+  <p>Warnings can be snoozed from the menu for 1, 4 or 24 hours. Critical ones still come through, and safe clean-ups still run.</p>
   <p class="note">It never quits an app and never touches documents, logs or crash reports.</p>
 
   <figure>

@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - mac-reaper.sh
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check the script
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax
+        run: bash -n mac-reaper.sh
+
+      - name: ShellCheck
+        run: shellcheck --shell=bash --severity=warning --exclude=SC2046 mac-reaper.sh
+
+  release:
+    name: Tag and release
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the version
+        id: version
+        run: |
+          version=$(sed -n 's/^VERSION="\([0-9][0-9.]*\)"$/\1/p' mac-reaper.sh)
+          if [ -z "$version" ]; then
+            echo "::error file=mac-reaper.sh::No VERSION=\"x.y\" line found"
+            exit 1
+          fi
+          tag="v$version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$tag is already released. Change VERSION in mac-reaper.sh to publish a new one."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish the release
+        if: steps.version.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          sha256sum mac-reaper.sh > mac-reaper.sh.sha256
+          gh release create "$TAG" mac-reaper.sh mac-reaper.sh.sha256 \
+            --title "Mac Reaper $TAG" \
+            --generate-notes \
+            --target "$GITHUB_SHA"

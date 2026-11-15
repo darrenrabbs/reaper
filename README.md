@@ -18,8 +18,11 @@ A background check runs every 10 minutes (a launchd agent). On each run it:
      caches, `~/.cache`, the Docker build cache, Trash items older than 30 days.
 3. If free disk is below `WARN_FREE_GB` (10 GB), clears the safe group, then shows a
    dialog listing the rest and waits for "Clear all" or "Not now".
-4. Sends a notification when swap passes `SWAP_WARN_MB` (4 GB) or `SWAP_CRIT_MB`
-   (10 GB), naming the apps using the most memory.
+4. Warns about memory when macOS reports memory pressure and swap is above
+   `SWAP_WARN_MB` (4 GB), when swap grows quickly between two checks, or when swap
+   passes `SWAP_CRIT_MB` (10 GB). The warning names the apps using the most memory,
+   measured the way Activity Monitor does. Swap left on disk after a busy spell does
+   not count as pressure.
 
 It never quits apps and never touches documents, logs or crash reports.
 
@@ -29,6 +32,10 @@ With [SwiftBar](https://github.com/swiftbar/SwiftBar) installed, a scythe icon s
 the disk percentage. The dropdown shows free space, swap and the biggest memory users,
 how much was cleared (today, 7 days, all time), every item that could be cleared with
 its size, and a full HTML report. Items can be cleared one at a time from the menu.
+
+Warnings can be snoozed from the menu for 1, 4 or 24 hours. Critical warnings still come
+through, and safe clean-ups still run. The report also lists large things the reaper
+leaves alone (virtual machine disks, simulators, model downloads), so nothing hides.
 
 ## Install
 
@@ -57,6 +64,7 @@ the script to deploy the new version.
 | `--clean-safe` | Clear every safe item now |
 | `--approve <item> [--yes]` | Clear one item; asks first if it needs an OK |
 | `--approve-all [--yes]` | Clear everything that needs an OK, after one dialog |
+| `--snooze <minutes>` | Silence warnings for that long; `0` resumes |
 
 ## Settings
 
@@ -69,6 +77,7 @@ Edit `~/.mac-reaper/config` (created on install). The main ones:
 | `WARN_USED_PCT` | 0 | Also act when the disk is this % full; 0 = off |
 | `SWAP_WARN_MB` | 4096 | Notify when swap in use passes this |
 | `SWAP_CRIT_MB` | 10240 | Urgent notification past this |
+| `SWAP_RISE_MB` | 1024 | Also warn when swap grows this much between two checks |
 | `AUTO_STOP_COLIMA` | 0 | 1 = run `colima stop` at `SWAP_CRIT_MB` |
 | `TRASH_MAX_AGE_DAYS` | 30 | Offer Trash items older than this; 0 = never |
 | `KEEP_CACHES` | empty | Folders in `~/Library/Caches` to keep, colon-separated |
@@ -83,6 +92,8 @@ Everything lives in `~/.mac-reaper/`:
 - `reaper.log`: what each run did
 - `history.tsv`: every deletion (when, how, KB freed, item)
 - `candidates.tsv`, `caches.tsv`: the latest scan
+- `memory.tsv`: memory by app at the last check
+- `large.tsv`: large items it leaves alone
 - `report.html`: the latest report
 
 ## Notes
