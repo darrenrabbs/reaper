@@ -23,7 +23,7 @@
 
 set -u
 
-VERSION="2.3"
+VERSION="2.3.1"
 REAPER_DIR="${REAPER_DIR:-$HOME/.mac-reaper}"
 SELF="$REAPER_DIR/mac-reaper.sh"
 LOG="$REAPER_DIR/reaper.log"
@@ -730,6 +730,20 @@ do_quit_app() {
   memory_snapshot; finish
 }
 
+# do_app_dialog <path of .app>: what the menu runs when you click an app in the memory list.
+do_app_dialog() {
+  local path="${1:-}" name mb out
+  case "$path" in /*.app) ;; *) echo "usage: --app /path/to/App.app"; exit 2 ;; esac
+  name=${path##*/}; name=$(clean "${name%.app}")
+  mb=$(awk -F'\t' -v n="$name" '$2 == n { print $1; exit }' "$MEMFILE" 2>/dev/null)
+  out=$(/usr/bin/osascript -e "display dialog \"$name is using about $(human $(( ${mb:-0} * 1024 ))) of memory.\n\nQuit closes it the normal way, so it can ask about unsaved work.\nForce quit stops it at once and loses unsaved work.\" with title \"Mac Reaper\" buttons {\"Not now\", \"Force quit\", \"Quit\"} default button \"Not now\" cancel button \"Not now\" giving up after $DIALOG_TIMEOUT_SEC" 2>/dev/null)
+  case "$out" in
+    *"button returned:Quit"*)       ASSUME_YES=1; do_quit_app "$path" quit ;;
+    *"button returned:Force quit"*) do_quit_app "$path" kill ;;   # asks once more before stopping it
+    *) log "left running: $name" ;;
+  esac
+}
+
 # ---------------------------------------------------------------- SwiftBar menu
 
 totals() {
@@ -764,10 +778,9 @@ render_menu() {
   if [ -s "$MEMFILE" ]; then
     head -n 6 "$MEMFILE" | while IFS="$TAB" read -r kb label reason; do
       label=$(clean "$label")
-      echo "--$label · $(human $((kb * 1024)))"
-      case "$reason" in /*.app)
-        echo "----Quit $label… | bash=\"$SELF\" param1=--quit-app param2=\"$reason\" terminal=false refresh=true"
-        echo "----Force quit… | bash=\"$SELF\" param1=--kill-app param2=\"$reason\" terminal=false refresh=true" ;;
+      case "$reason" in
+        /*.app) echo "--$label · $(human $((kb * 1024))) · quit… | bash=\"$SELF\" param1=--app param2=\"$reason\" terminal=false refresh=true" ;;
+        *)      echo "--$label · $(human $((kb * 1024)))" ;;
       esac
     done
   fi
@@ -1067,6 +1080,7 @@ case "$CMD" in
   --approve)        do_approve "$ARG" ;;
   --approve-all)    do_approve_all ;;
   --snooze)         do_snooze "${ARG:-60}" ;;
+  --app)            do_app_dialog "$ARG" ;;
   --quit-app)       do_quit_app "$ARG" quit ;;
   --kill-app)       do_quit_app "$ARG" kill ;;
   --dry-run)        DRY_RUN=1; FORCE=1; run_check ;;

@@ -34,9 +34,9 @@ the disk percentage. The dropdown shows free space, swap and the biggest memory 
 how much was cleared (today, 7 days, all time), every item that could be cleared with
 its size, and a full HTML report. Items can be cleared one at a time from the menu.
 
-Each app in the memory list has Quit and Force quit items, so the fix for a memory
-warning is in the same menu. Quit closes the app the normal way, so it can ask about
-unsaved work. Force quit stops it at once. Both ask first.
+Click an app in the memory list to quit it, so the fix for a memory warning is in the
+same menu. A dialog offers Quit, which closes the app the normal way so it can ask about
+unsaved work, or Force quit, which stops it at once and asks once more first.
 
 Warnings can be snoozed from the menu for 1, 4 or 24 hours. Critical warnings still come
 through, and safe clean-ups still run. The report also lists large things the reaper
@@ -70,6 +70,7 @@ the script to deploy the new version.
 | `--approve <item> [--yes]` | Clear one item; asks first if it needs an OK |
 | `--approve-all [--yes]` | Clear everything that needs an OK, after one dialog |
 | `--snooze <minutes>` | Silence warnings for that long; `0` resumes |
+| `--app <App.app path>` | The dialog the menu shows: Quit, Force quit or Not now |
 | `--quit-app <App.app path>` | Ask an app to quit the normal way, after a confirmation |
 | `--kill-app <App.app path>` | Force quit an app, after a confirmation |
 
