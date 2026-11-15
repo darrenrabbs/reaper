@@ -22,7 +22,7 @@
 
 set -u
 
-VERSION="2.2"
+VERSION="2.2.1"
 REAPER_DIR="${REAPER_DIR:-$HOME/.mac-reaper}"
 SELF="$REAPER_DIR/mac-reaper.sh"
 LOG="$REAPER_DIR/reaper.log"
@@ -590,7 +590,12 @@ finish() {  # refresh the things the menu and report read
 }
 
 run_check() {
-  acquire_lock || exit 0
+  if [ "$FORCE" = 1 ]; then
+    # run by hand (--dry-run, --force): wait for a background check that is still going
+    acquire_lock_wait 60 || { echo "Another check is still running. Try again in a minute."; exit 1; }
+  else
+    acquire_lock || exit 0
+  fi
   rotate_log
   local swap low=0 auto_kb=0 more level
   ASKED_KB=0
@@ -909,8 +914,13 @@ exec /bin/bash "$SELF" --menu
 PLUG
   chmod 755 "$dir/$PLUGIN_NAME"
   xattr -d com.apple.quarantine "$dir/$PLUGIN_NAME" 2>/dev/null
-  pgrep -x SwiftBar >/dev/null 2>&1 && open -g "swiftbar://refreshallplugins" >/dev/null 2>&1
   echo "SwiftBar plugin installed: $dir/$PLUGIN_NAME"
+  if pgrep -x SwiftBar >/dev/null 2>&1; then
+    open -g "swiftbar://refreshallplugins" >/dev/null 2>&1
+  elif open -ga SwiftBar >/dev/null 2>&1; then
+    echo "SwiftBar was not running, so it has been started."
+    echo "To keep the icon after a restart, turn on Launch at Login in SwiftBar's settings."
+  fi
 }
 
 do_install() {
