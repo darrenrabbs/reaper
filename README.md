@@ -35,8 +35,10 @@ how much was cleared (today, 7 days, all time), every item that could be cleared
 its size, and a full HTML report. Items can be cleared one at a time from the menu.
 
 Click an app in the memory list to quit it, so the fix for a memory warning is in the
-same menu. A dialog offers Quit, which closes the app the normal way so it can ask about
-unsaved work, or Force quit, which stops it at once and asks once more first.
+same menu. Ordinary apps end in "quit…"; system processes are listed but can't be
+clicked. A dialog offers Quit, which closes the app the normal way so it can ask about
+unsaved work, Force quit, which stops it at once and asks once more first, or Not now.
+The first time, macOS asks whether SwiftBar may control that app; allow it.
 
 Warnings can be snoozed from the menu for 1, 4 or 24 hours. Critical warnings still come
 through, and safe clean-ups still run. The report also lists large things the reaper
@@ -51,8 +53,9 @@ bash mac-reaper.sh --install
 ```
 
 `--install` copies the script to `~/.mac-reaper/`, schedules the background check and
-adds a three-line launcher to the SwiftBar plugin folder. Run it again after editing
-the script to deploy the new version.
+adds a three-line launcher to the SwiftBar plugin folder. If SwiftBar isn't running, it
+starts it; turn on Launch at Login in SwiftBar's settings to keep the icon after a
+restart. Run `--install` again after editing the script to deploy the new version.
 
 ## Commands
 
@@ -107,5 +110,9 @@ Everything lives in `~/.mac-reaper/`:
 ## Notes
 
 - Written for the bash 3.2 that macOS ships; no dependencies beyond macOS tools.
+- SwiftBar runs the script directly when you click a menu item, so it must stay
+  executable. `--install` sets this. If clicks stop doing anything, run
+  `chmod 755 ~/.mac-reaper/mac-reaper.sh`. Every click is recorded in the log as a
+  "menu action" line, so a click that fails still leaves a trace.
 - The Trash is only reachable if `/bin/bash` has Full Disk Access; otherwise it is skipped.
 - The schedule is the launchd agent `local.mac-reaper` in `~/Library/LaunchAgents/`.

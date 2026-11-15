@@ -23,7 +23,7 @@
 
 set -u
 
-VERSION="2.3.1"
+VERSION="2.3.2"
 REAPER_DIR="${REAPER_DIR:-$HOME/.mac-reaper}"
 SELF="$REAPER_DIR/mac-reaper.sh"
 LOG="$REAPER_DIR/reaper.log"
@@ -703,9 +703,10 @@ app_pids() {
 # quit asks the app to close the normal way, so it can prompt about unsaved work.
 # kill stops it at once, which loses unsaved work; for an app that will not quit.
 do_quit_app() {
-  local path="${1:-}" how="$2" name id pids pid mb
-  case "$path" in /*.app) ;; *) echo "usage: --quit-app|--kill-app /path/to/App.app"; exit 2 ;; esac
-  [ -d "$path" ] || { echo "no such app: $path"; exit 1; }
+  local path="${1:-}" how="$2" name id pids pid mb err
+  path=${path#\"}; path=${path%\"}
+  case "$path" in /*.app) ;; *) log "quit: not an app path: $(printf '%q' "$1")"; echo "usage: --quit-app|--kill-app /path/to/App.app"; exit 2 ;; esac
+  [ -d "$path" ] || { log "quit: no such app: $path"; echo "no such app: $path"; exit 1; }
   name=${path##*/}; name=$(clean "${name%.app}")
   pids=$(app_pids "$path")
   [ -n "${pids// /}" ] || { log "$name is not running"; memory_snapshot; finish; exit 0; }
@@ -713,11 +714,16 @@ do_quit_app() {
 
   if [ "$how" = quit ]; then
     id=$(defaults read "$path/Contents/Info" CFBundleIdentifier 2>/dev/null)
-    case "$id" in ''|*[!A-Za-z0-9._-]*) echo "could not read the app's identifier: $path"; exit 1 ;; esac
+    case "$id" in ''|*[!A-Za-z0-9._-]*) log "quit: could not read the identifier of $path"; echo "could not read the app's identifier: $path"; exit 1 ;; esac
     confirm_dialog "Quit $name?\n\nIt is using about $(human $(( ${mb:-0} * 1024 ))) of memory. It closes the normal way, so it will ask about unsaved work." "Quit" || { log "not quit (you said not now): $name"; exit 0; }
     [ "$DRY_RUN" = 1 ] && exit 0
-    /usr/bin/osascript -e "tell application id \"$id\" to quit" >/dev/null 2>&1
-    log "asked $name to quit (was using ${mb:-?} MB)"
+    if err=$(/usr/bin/osascript -e "tell application id \"$id\" to quit" 2>&1 >/dev/null); then
+      log "asked $name to quit (was using ${mb:-?} MB)"
+    else
+      log "quit: macOS refused to quit $name: $(printf '%s' "$err" | tr '\n' ' ')"
+      /usr/bin/osascript -e "display notification \"Could not quit $name. If macOS asked about controlling apps, allow SwiftBar and try again.\" with title \"Mac Reaper\"" >/dev/null 2>&1
+      exit 1
+    fi
   else
     confirm_dialog "Force quit $name?\n\nIt stops at once and unsaved work in it is lost. Use this only when it will not quit the normal way." "Force quit" || { log "not force quit (you said not now): $name"; exit 0; }
     [ "$DRY_RUN" = 1 ] && exit 0
@@ -732,11 +738,16 @@ do_quit_app() {
 
 # do_app_dialog <path of .app>: what the menu runs when you click an app in the memory list.
 do_app_dialog() {
-  local path="${1:-}" name mb out
-  case "$path" in /*.app) ;; *) echo "usage: --app /path/to/App.app"; exit 2 ;; esac
+  local path="${1:-}" name mb out rc err
+  path=${path#\"}; path=${path%\"}
+  case "$path" in /*.app) ;; *) log "quit: not an app path: $(printf '%q' "$1")"; exit 2 ;; esac
   name=${path##*/}; name=$(clean "${name%.app}")
   mb=$(awk -F'\t' -v n="$name" '$2 == n { print $1; exit }' "$MEMFILE" 2>/dev/null)
-  out=$(/usr/bin/osascript -e "display dialog \"$name is using about $(human $(( ${mb:-0} * 1024 ))) of memory.\n\nQuit closes it the normal way, so it can ask about unsaved work.\nForce quit stops it at once and loses unsaved work.\" with title \"Mac Reaper\" buttons {\"Not now\", \"Force quit\", \"Quit\"} default button \"Not now\" cancel button \"Not now\" giving up after $DIALOG_TIMEOUT_SEC" 2>/dev/null)
+  out=$(/usr/bin/osascript -e "display dialog \"$name is using about $(human $(( ${mb:-0} * 1024 ))) of memory.\n\nQuit closes it the normal way, so it can ask about unsaved work.\nForce quit stops it at once and loses unsaved work.\" with title \"Mac Reaper\" buttons {\"Not now\", \"Force quit\", \"Quit\"} default button \"Not now\" cancel button \"Not now\" giving up after $DIALOG_TIMEOUT_SEC" 2>"$REAPER_DIR/.osa.$$"); rc=$?
+  err=$(tr '\n' ' ' < "$REAPER_DIR/.osa.$$" 2>/dev/null); rm -f "$REAPER_DIR/.osa.$$"
+  if [ "$rc" -ne 0 ] && [ -n "$err" ] && ! printf '%s' "$err" | grep -q -- '-128'; then
+    log "quit: the dialog failed for $name: $err"; exit 1
+  fi
   case "$out" in
     *"button returned:Quit"*)       ASSUME_YES=1; do_quit_app "$path" quit ;;
     *"button returned:Force quit"*) do_quit_app "$path" kill ;;   # asks once more before stopping it
@@ -1067,6 +1078,11 @@ do_uninstall() {
 CMD="${1:-}"; ARG="${2:-}"
 for a in "$@"; do [ "$a" = "--yes" ] && ASSUME_YES=1; done
 [ "$ARG" = "--yes" ] && ARG=""
+
+case "$CMD" in
+  --app|--quit-app|--kill-app|--approve|--approve-all|--clean-safe|--snooze|--scan|--report)
+    log "menu action: $CMD $(printf '%q ' "${@:2}")" ;;
+esac
 
 case "$CMD" in
   --install)        do_install ;;

@@ -142,7 +142,6 @@ Compressor Info: … with <mark>18 swapfiles and LOW swap space</mark></pre>
     <li>When macOS reports memory pressure and swap is above 4 GB, or swap is growing fast, it sends a notification naming the apps using the most memory. Above 10 GB of swap the notification is urgent.</li>
   </ol>
   <p>Warnings can be snoozed from the menu for 1, 4 or 24 hours. Critical ones still come through, and safe clean-ups still run.</p>
-  <p>When memory is the problem, click an app in the menu's memory list. A dialog offers Quit, which closes it the normal way so it can ask about unsaved work, or Force quit, which stops it at once.</p>
   <p class="note">It never quits an app unless you pick Quit in the menu, and never touches documents, logs or crash reports.</p>
 
   <figure>
@@ -150,11 +149,25 @@ Compressor Info: … with <mark>18 swapfiles and LOW swap space</mark></pre>
     <figcaption>The report: disk and swap, what has been cleared, and what could be cleared now.</figcaption>
   </figure>
 
+  <p>The report also lists large things the reaper leaves alone, such as virtual machine disks, simulators and downloaded models, with what you can do about each, so nothing big goes unnoticed.</p>
+
+  <h2>Quitting an app from the menu</h2>
+  <p>Swap only goes down when the apps holding the memory let go of it. Deleting files doesn't help, but quitting the right app does. So the menu lists the apps using the most memory, measured the way Activity Monitor measures them, and you can quit any ordinary app straight from that list. System processes are listed but can't be clicked.</p>
+  <p>Clicking an app opens a dialog with three choices:</p>
+  <ul class="plain">
+    <li><strong>Quit</strong> closes the app the normal way, so it can still ask about unsaved work.</li>
+    <li><strong>Force quit</strong> stops it at once and asks once more first. It's for an app that has stopped responding.</li>
+    <li><strong>Not now</strong> leaves it running.</li>
+  </ul>
+  <p>The first time, macOS asks whether SwiftBar may control that app. Allow it, or Quit can't work.</p>
+
   <h2>Under the hood</h2>
   <ul class="plain">
-    <li>One bash script of under 900 lines, written for the bash 3.2 that macOS ships.</li>
+    <li>One bash script of about 1,100 lines, written for the bash 3.2 that macOS ships.</li>
     <li>A launchd agent runs the check. The menu is a three-line SwiftBar plugin that asks the same script to print it.</li>
     <li>Open apps come from <code>lsappinfo</code>, and each cache folder is matched to its app by bundle ID.</li>
+    <li>Memory per app is the footprint that <code>top</code> reports, the same figure Activity Monitor shows. Warnings follow the kernel's memory pressure level, so swap left over from a busy spell doesn't set them off.</li>
+    <li>Quit sends the app a normal quit request through AppleScript. Force quit signals the app's processes directly.</li>
     <li>State is plain text: a log, a history of every deletion and the latest scan. The report is generated HTML.</li>
     <li>Thresholds, the Trash age limit and a keep-list for caches live in one settings file.</li>
   </ul>
@@ -167,7 +180,7 @@ bash reaper/mac-reaper.sh --install</pre>
 
   <h2>Status</h2>
   <p>This is an early version that has run on one Mac so far. It deletes files, so check what it would clear first: <code>--dry-run</code> shows a full clean-up without deleting anything.</p>
-  <p>The source is on <a href="https://github.com/darrenrabbs/reaper">GitHub</a>. It was built by Darren Rabbitt with Claude as the coding agent.</p>
+  <p>The source and <a href="https://github.com/darrenrabbs/reaper/releases">releases</a> are on <a href="https://github.com/darrenrabbs/reaper">GitHub</a>. It was built by Darren Rabbitt with Claude as the coding agent.</p>
 
 </main>
 <footer>
